@@ -1,11 +1,6 @@
-
-from drivers.SignalCore_SC5511A import SC5511A
-
+from qcodes.tests.instrument_mocks import DummyInstrument
 
 initial_Instruments ={
-
-"dac1": {"driver_class": SC5511A,  "s_n": "10"},
-"dac2": {"driver_class": SC5511A,  "s_n": "11"}
-
+    "dac": {"driver_class": DummyInstrument},
 }
 

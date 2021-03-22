@@ -50,9 +50,8 @@ def script() -> None:
         serverWithGui(args.port)
     else:
         app_exec, server_ = server(args.port, args.allow_user_shutdown)
-    return server_
 
 if __name__ == "__main__":
-    server = script()
+    script()
 
 
