@@ -52,7 +52,7 @@ class BaseClient:
 
         send(self.socket, message)
         ret = recv(self.socket)
-        logger.info(f"Response received.")
+        # logger.info(f"Response received.")
         logger.debug(f"Response: {str(ret)}")
 
         if isinstance(ret, ServerResponse):

@@ -506,8 +506,8 @@ class StationServer(QtCore.QObject):
                 instruction = message
                 try:
                     instruction.validate()
-                    logger.info(f"Received request for operation: "
-                                f"{str(instruction.operation)}")
+                    # logger.info(f"Received request for operation: "
+                    #             f"{str(instruction.operation)}")
                     logger.debug(f"Instruction received: "
                                  f"{str(instruction)}")
                 except Exception as e:
@@ -522,7 +522,7 @@ class StationServer(QtCore.QObject):
                     response_to_client = self.executeServerInstruction(instruction)
                     response_log = f"Response to client: {str(response_to_client)}"
                     if response_to_client.error is None:
-                        logger.info(f"Response sent to client.")
+                        # logger.info(f"Response sent to client.")
                         logger.debug(response_log)
                     else:
                         logger.warning(response_log)
