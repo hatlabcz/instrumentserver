@@ -14,6 +14,7 @@ Core functionality of the instrument server.
 #   operations for adding parameters/submodules/functions
 # TODO: can we also create methods remotely?
 
+import os
 import importlib
 import inspect
 import logging
@@ -291,6 +292,53 @@ def bluePrintFromInstrumentModule(path: str, ins: InstrumentModuleType) -> \
 
     return bp
 
+@dataclass
+class ParameterBroadcastBluePrint:
+    """blueprint to broadcast parameter changes"""
+    name: str
+    action: str
+    value: int = None
+    unit: str = None
+
+    def __init__(self, name: str, action: str, value: int = None, unit: str = None):
+        self.name = name
+        self.value = value
+        self.unit = unit
+        self.action = action
+
+    def __str__(self) -> str:
+        ret = f"""\"name\":\"{self.name}\": {{    
+    \"action\":\"{self.action}" """
+        if self.value is not None:
+            ret = ret + f"\n    \"value\":\"{self.value}\""
+        if self.unit is not None:
+            ret = ret + f"\n    \"unit\":\"{self.unit}\""
+        ret = ret + f"""\n}}"""
+        return ret
+
+    def __repr__(self):
+        return str(self)
+
+    def pprint(self, indent=0):
+
+        i = indent * ' '
+        ret = f"""name: {self.name}
+{i}- action: {self.action}
+{i}- value: {self.value}
+{i}- unit: {self.unit}
+    """
+        return ret
+
+    def toDictFormat(self):
+        """
+        Formats the blueprint for easy conversion to dictionary later.
+        """
+        ret = f"'name': '{self.name}'," \
+              f" 'action': '{self.action}'," \
+              f" 'value': '{self.value}'," \
+              f" 'unit': '{self.unit}'"
+        return "{"+ret+"}"
+
 
 @dataclass
 class ParameterSerializeSpec:
@@ -313,6 +361,7 @@ class ParameterSerializeSpec:
 
 @dataclass
 class ServerInstruction:
+    #TODO: Remove set parameterr from the code.
     """Instruction spec for the server.
 
     Valid operations:
@@ -402,6 +451,9 @@ class StationServer(QtCore.QObject):
     """The main server object.
 
     Encapsulated in a separate object so we can run it in a separate thread.
+
+    port should always be an odd number to allow the next even number to be its corresponding
+    publishing port
     """
 
     # we use this to quit the server.
@@ -438,14 +490,30 @@ class StationServer(QtCore.QObject):
     #: Arguments: full function location as string, arguments, kw arguments, return value
     funcCalled = QtCore.Signal(str, object, object, object)
 
-    def __init__(self, parent=None, port=5555, allowUserShutdown=False):
+    def __init__(self,
+                 parent: Optional[QtCore.QObject] = None,
+                 port: int = 5555,
+                 allowUserShutdown: bool = False,
+                 addresses: List[str] = [],
+                 initScript: Optional[str] = None,
+                 ) -> None:
         super().__init__(parent)
+
+        if addresses is None:
+            addresses = []
+        if initScript == None:
+            initScript = ''
 
         self.SAFEWORD = ''.join(random.choices([chr(i) for i in range(65, 91)], k=16))
         self.serverRunning = False
         self.port = port
         self.station = Station()
         self.allowUserShutdown = allowUserShutdown
+        self.listenAddresses = list(set(['127.0.0.1'] + addresses))
+        self.initScript = initScript
+
+        self.broadcastPort = port + 1
+        self.broadcastSocket = None
 
         self.parameterSet.connect(
             lambda n, v: logger.info(f"Parameter '{n}' set to: {str(v)}")
@@ -459,19 +527,39 @@ class StationServer(QtCore.QObject):
                                                   f"kwargs: {str(kw)})'.")
         )
 
+    def _runInitScript(self):
+        if os.path.exists(self.initScript):
+            path = os.path.abspath(self.initScript)
+            env = dict(station=self.station)
+            exec(open(path).read(), env)
+        else:
+            logger.warning(f"path to initscript ({self.initScript}) not found.")
+
     @QtCore.Slot()
-    def startServer(self):
+    def startServer(self) -> None:
         """Start the server. This function does not return until the ZMQ server
         has been shut down."""
 
-        addr = f"tcp://*:{self.port}"
-        logger.info(f"Starting server at {addr}")
+        logger.info(f"Starting server.")
         logger.info(f"The safe word is: {self.SAFEWORD}")
         context = zmq.Context()
         socket = context.socket(zmq.REP)
-        socket.bind(addr)
+
+        for a in self.listenAddresses:
+            addr = f"tcp://{a}:{self.port}"
+            socket.bind(addr)
+            logger.info(f"Listening at {addr}")
+
+        # creating and binding publishing socket to broadcast changes
+        broadcastAddr = f"tcp://*:{self.broadcastPort}"
+        logger.info(f"Starting publishing server at {broadcastAddr}")
+        self.broadcastSocket = context.socket(zmq.PUB)
+        self.broadcastSocket.bind(broadcastAddr)
 
         self.serverRunning = True
+        if self.initScript not in ['', None]:
+            logger.info(f"Running init script")
+            self._runInitScript()
         self.serverStarted.emit(addr)
 
         while self.serverRunning:
@@ -534,14 +622,16 @@ class StationServer(QtCore.QObject):
                 logger.debug(f"Invalid message received: {str(message)}")
 
             send(socket, response_to_client)
+
             self.messageReceived.emit(str(message), response_log)
 
+        self.broadcastSocket.close()
         socket.close()
         self.finished.emit()
         return True
 
     def executeServerInstruction(self, instruction: ServerInstruction) \
-            -> ServerResponse:
+            -> Tuple[ServerResponse, str]:
         """
         This is the interpreter function that the server will call to translate the
         dictionary received from the proxy to instrument calls.
@@ -620,11 +710,20 @@ class StationServer(QtCore.QObject):
         kwargs = spec.kwargs if spec.kwargs is not None else {}
         ret = obj(*args, **kwargs)
 
+        # check if a new parameter is being created
+        self._newOrDeleteParameterDetection(spec, args, kwargs)
+
         if isinstance(obj, Parameter):
             if len(args) > 0:
                 self.parameterSet.emit(spec.target, args[0])
+
+                # broadcast changes in parameter values
+                self._broadcastParameterChange(ParameterBroadcastBluePrint(spec.target, 'parameter-update', args[0]))
             else:
                 self.parameterGet.emit(spec.target, ret)
+
+                # broadcast calls of parameters
+                self._broadcastParameterChange(ParameterBroadcastBluePrint(spec.target, 'parameter-call', ret))
         else:
             self.funcCalled.emit(spec.target, args, kwargs, ret)
 
@@ -656,13 +755,56 @@ class StationServer(QtCore.QObject):
     def _fromParamDict(self, params: Dict[str, Any]):
         return serialize.fromParamDict(params, self.station)
 
+    def _broadcastParameterChange(self, blueprint: ParameterBroadcastBluePrint):
+        """
+        Broadcast any changes to parameters in the server.
+        The message is composed of a 2 part array. The first item is the name of the instrument the parameter is from,
+        with the second item being the string of the blueprint in dict format.
+        this is done to allow subscribers to subscribe to specific instruments.
 
-def startServer(port=5555, allowUserShutdown=False) -> \
+        :param blueprint: the parameter broadcast blueprint that is being broadcast
+        """
+        self.broadcastSocket.send_string(blueprint.name.split('.')[0], flags=zmq.SNDMORE)
+        self.broadcastSocket.send_string((blueprint.toDictFormat()))
+        logger.info(f"Parameter {blueprint.name} has broadcast an update of type: {blueprint.action},"
+                     f" with a value: {blueprint.value}.")
+
+    def _newOrDeleteParameterDetection(self, spec, args, kwargs):
+        """
+        detects if the call action is being used to create a new parameter or deletes an existing parameter.
+        If so, it creates the parameter broadcast blueprint and broadcast it.
+
+        :param spec: CallSpec object being passed to the call method
+        :param args: args being passed to the call method
+        :param kwargs: kwargs being passed to the call method
+        """
+
+        if spec.target.split('.')[-1] == 'add_parameter':
+            name = spec.target.split('.')[0] + '.' + '.'.join(spec.args)
+            pb = ParameterBroadcastBluePrint(name,
+                                             'parameter-creation',
+                                             kwargs['initial_value'],
+                                             kwargs['unit'])
+            self._broadcastParameterChange(pb)
+        elif spec.target.split('.')[-1] == 'remove_parameter':
+            name = spec.target.split('.')[0] + '.' + '.'.join(spec.args)
+            pb = ParameterBroadcastBluePrint(name,
+                                             'parameter-deletion')
+            self._broadcastParameterChange(pb)
+
+
+def startServer(port: int = 5555,
+                allowUserShutdown: bool = False,
+                addresses: List[str] = [],
+                initScript: Optional[str] = None) -> \
         Tuple[StationServer, QtCore.QThread]:
     """Create a server and run in a separate thread.
     :returns: the server object and the thread it's running in.
     """
-    server = StationServer(port=port, allowUserShutdown=allowUserShutdown)
+    server = StationServer(port=port,
+                           allowUserShutdown=allowUserShutdown,
+                           addresses=addresses,
+                           initScript=initScript)
     thread = QtCore.QThread()
     server.moveToThread(thread)
     server.finished.connect(thread.quit)

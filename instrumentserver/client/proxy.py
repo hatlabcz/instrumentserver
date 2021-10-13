@@ -4,18 +4,19 @@ Created on Sat Apr 18 16:13:40 2020
 
 @author: Chao
 """
-import os
-from typing import Any, Union, Optional, Dict, List
-import logging
 import inspect
-from types import MethodType
-
 import json
+import logging
+import os
+from types import MethodType
+from typing import Any, Union, Optional, Dict, List
+
 import qcodes as qc
+import zmq
 from qcodes import Instrument, Parameter
 from qcodes.instrument.base import InstrumentBase
 
-from instrumentserver import QtCore, DEFAULT_PORT, serialize
+from instrumentserver import QtCore, DEFAULT_PORT
 from instrumentserver.server.core import (
     ServerInstruction,
     InstrumentModuleBluePrint,
@@ -25,11 +26,8 @@ from instrumentserver.server.core import (
     Operation,
     InstrumentCreationSpec,
     ParameterSerializeSpec,
-    INSTRUMENT_MODULE_BASE_CLASSES,
-    PARAMETER_BASE_CLASSES,
 )
 from .core import sendRequest, BaseClient
-
 
 logger = logging.getLogger(__name__)
 
@@ -92,7 +90,7 @@ class ProxyMixin:
         req = ServerInstruction(
             operation=Operation.call,
             call_spec=CallSpec(
-                target=self.remotePath+'.snapshot', args=args, kwargs=kwargs
+                target=self.remotePath + '.snapshot', args=args, kwargs=kwargs
             )
         )
         return self.askServer(req)
@@ -110,6 +108,7 @@ class ProxyParameter(ProxyMixin, Parameter):
         if `remotePath` and `bluePrint` are both supplied, the blue print takes
         priority.
     """
+
     def __init__(self, name: str, *args,
                  cli: Optional["Client"] = None,
                  host: Optional[str] = 'localhost',
@@ -190,6 +189,7 @@ class ProxyInstrumentModule(ProxyMixin, InstrumentBase):
                 def remove_parameter(obj, name: str):
                     obj.cli.call(f'{obj.remotePath}.remove_parameter', name)
                     obj.update()
+
                 self.remove_parameter = MethodType(remove_parameter, self)
 
         self.parameters.pop('IDN', None)  # we will redefine this later
@@ -218,7 +218,7 @@ class ProxyInstrumentModule(ProxyMixin, InstrumentBase):
 
         bp: InstrumentModuleBluePrint
         bp = self.cli.getBluePrint(self.name)
-        self.cli.call(self.name+".add_parameter", name, *arg, **kw)
+        self.cli.call(self.name + ".add_parameter", name, *arg, **kw)
         self.update()
 
     def _getProxyParameters(self) -> None:
@@ -238,8 +238,9 @@ class ProxyInstrumentModule(ProxyMixin, InstrumentBase):
             if pn not in self.bp.parameters:
                 delKeys.append(pn)
 
+        # Changing the argument for del self.parameters[pn] to del self.parameters[k]
         for k in delKeys:
-            del self.parameters[pn]
+            del self.parameters[k]
 
     def _getProxyMethods(self):
         """Based on the method blue print replied from server, add the
@@ -263,7 +264,7 @@ class ProxyInstrumentModule(ProxyMixin, InstrumentBase):
         args = []
         for pn in sig.parameters:
             if sig.parameters[pn].kind in [inspect.Parameter.POSITIONAL_OR_KEYWORD,
-                                              inspect.Parameter.POSITIONAL_ONLY]:
+                                           inspect.Parameter.POSITIONAL_ONLY]:
                 args.append(f'{pn}')
             elif sig.parameters[pn].kind is inspect.Parameter.VAR_POSITIONAL:
                 args.append(f"*{pn}")
@@ -305,6 +306,38 @@ class ProxyInstrumentModule(ProxyMixin, InstrumentBase):
                 delKeys.append(sn)
         for k in delKeys:
             del self.submodules[sn]
+
+    def _refreshProxySubmodules(self):
+        delKeys = []
+        for sn, s in self.submodules.items():
+            if sn in self.bp.submodules:
+                delKeys.append(sn)
+        for k in delKeys:
+            del self.submodules[sn]
+
+        for sn, s in self.bp.submodules.items():
+            if sn not in self.submodules:
+                submodule = ProxyInstrumentModule(
+                    s.name, cli=self.cli, host=self.host, port=self.port, bluePrint=s)
+                self.add_submodule(sn, submodule)
+            else:
+                self.submodules[sn].update()
+
+    def __getattr__(self, item):
+        try:
+            return super().__getattr__(item)
+        except Exception as e:
+            current_bp = self.cli.getBluePrint(self.remotePath)
+            if item in current_bp.parameters and item not in self.parameters:
+                self.bp = current_bp
+                self._getProxyParameters()
+                return getattr(self, item)
+            elif item in current_bp.submodules and item not in self.submodules:
+                self.bp = current_bp
+                self._getProxySubmodules()
+                return getattr(self, item)
+            else:
+                raise e
 
 
 ProxyInstrument = ProxyInstrumentModule
@@ -410,9 +443,70 @@ class Client(BaseClient):
 
     def paramsFromFile(self, filePath: str):
         params = None
-        with open(filePath, 'r') as f:
-            params = json.load(f)
-        self.setParameters(params)
+        if os.path.exists(filePath):
+            with open(filePath, 'r') as f:
+                params = json.load(f)
+            self.setParameters(params)
+        else:
+            logger.warning(f"File {filePath} does not exist. No params loaded.")
+
+
+class SubClient(QtCore.QObject):
+    """
+    Specific subscription client used for real-time parameter updates.
+    """
+    #: Signal(str) --
+    #: emitted when the server broadcast either a new parameter or an update to an existing one
+    update = QtCore.Signal(str)
+
+    def __init__(self, instruments: List[str] = None, sub_host: str = 'localhost', sub_port: int = DEFAULT_PORT+1):
+        """
+        Creates a new subscription client.
+
+        :param instruments: List of instruments the subclient will listen for.
+                            If empty it will listen to all broadcasts done by the server
+        :param host: the host location of the updates
+        :param port: Should not be changed. it always is the server normal port +1
+        """
+        super().__init__()
+        self.host = sub_host
+        self.port = sub_port
+        self.addr = f"tcp://{self.host}:{self.port}"
+        self.instruments = instruments
+
+        self.connected = False
+
+
+    def connect(self):
+        """
+        Connects the subscription client with the broadcast
+        and runs an infinite loop to check for updates.
+
+        It should always be run on a separate thread or the program will get stuck in the loop.
+        """
+        logger.info(f"Connecting to {self.addr}")
+        context = zmq.Context()
+        socket = context.socket(zmq.SUB)
+        socket.connect(self.addr)
+
+        # subscribe to the specified instruments
+        if self.instruments is None:
+            socket.setsockopt_string(zmq.SUBSCRIBE, '')
+        else:
+            for ins in self.instruments:
+                socket.setsockopt_string(zmq.SUBSCRIBE, ins)
+
+        self.connected = True
+
+        while self.connected:
+
+            message = socket.recv_multipart()
+            # emits the signals already decoded so python recognizes it a string instead of bytes
+            self.update.emit(message[1].decode("utf-8"))
+
+        self.disconnect()
+
+        return True
 
 
 class _QtAdapter(QtCore.QObject):

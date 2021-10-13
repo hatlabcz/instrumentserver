@@ -1,5 +1,7 @@
+import os
 from typing import Any, Dict, Union, List
 from enum import Enum, unique, auto
+import logging
 
 import json
 from qcodes import Instrument, Parameter
@@ -8,6 +10,10 @@ from qcodes.utils import validators
 
 from . import serialize
 from .server.core import ParameterBluePrint, bluePrintFromParameter
+
+
+logger = logging.getLogger(__name__)
+
 
 @unique
 class ParameterTypes(Enum):
@@ -71,6 +77,9 @@ class ParameterManager(InstrumentBase):
 
     def __init__(self, name):
         super().__init__(name)
+
+        #: default location and name of the parameters save file.
+        self._paramValuesFile = os.path.join(os.getcwd(), f'parameter_manager-{self.name}.json')
 
     @staticmethod
     def createFromParamDict(paramDict: Dict[str, Any], name: str) -> "ParameterManager":
@@ -214,17 +223,24 @@ class ParameterManager(InstrumentBase):
 
         return tolist(tree)
 
-    def fromFile(self, filePath: str, deleteMissing: bool = True):
+    def fromFile(self, filePath: str = None, deleteMissing: bool = True):
         """load parameters from a parameter json file
         (see :mod:`.serialize`).
 
-        :param filePath: path to the json file
+        :param filePath: path to the json file. If ``None`` it looks in the instrument current location
+                         directory for a file called "parametermanager_parameters.json"
         :param deleteMissing: if ``True``, delete parameters currently in the
             ParameterManager that are not listed in the file.
         """
-        with open(filePath, 'r') as f:
-            pd = json.load(f)
-        self.fromParamDict(pd)
+        if filePath is None:
+            filePath = self._paramValuesFile
+
+        if os.path.exists(filePath):
+            with open(filePath, 'r') as f:
+                pd = json.load(f)
+            self.fromParamDict(pd)
+        else:
+            logger.warning("parameter file not found, cannot load.")
 
     def fromParamDict(self, paramDict: Dict[str, Any],
                       deleteMissing: bool = True):
@@ -254,10 +270,38 @@ class ParameterManager(InstrumentBase):
 
             if self.has_param(pn):
                 self.parameter(pn)(val)
+                if unit is not None:
+                    self.parameter(pn).unit = unit
+
             else:
                 self.add_parameter(pn, initial_value=val, unit=unit)
 
         for pn in currentParams:
             if pn not in fileParams and deleteMissing:
                 self.remove_parameter(pn)
+
+    def toParamDict(self, simpleFormat: bool = False, includeMeta: List[str] = ['unit']):
+        params = serialize.toParamDict([self], simpleFormat=simpleFormat,
+                                       includeMeta=includeMeta)
+        return params
+
+    def toFile(self, filePath: str = None):
+
+        """Save parameters from the instrument into a json file.
+
+        :param filePath: path to the json file.
+            If ``None`` it looks in the instrument current working
+            directory for a file called "parameter_manager-<name_of_this_instrument>.json"
+        """
+
+        if filePath is None:
+            filePath = self._paramValuesFile
+
+        folder, file = os.path.split(filePath)
+        params = self.toParamDict()
+        if not os.path.exists(folder):
+            os.makedirs(folder)
+        with open(filePath, 'w') as f:
+            json.dump(params, f, indent=2, sort_keys=True)
+
 
