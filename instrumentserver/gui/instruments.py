@@ -329,7 +329,7 @@ class ParametersTreeView(InstrumentTreeViewBase):
     @QtCore.Slot(object, object)
     def onItemNewValue(self, itemName, value):
         widget = self.delegate.parameters[itemName]
-        widget.paramWidget.setValue(value)
+        widget._setMethod(value)
 
 
 class InstrumentParameters(InstrumentDisplayBase):
