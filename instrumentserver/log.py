@@ -5,6 +5,7 @@ instrumentserver.log : Logging tools and defaults for instrumentserver.
 import sys
 import logging
 from enum import Enum, auto, unique
+from html import escape
 
 from . import QtGui, QtWidgets
 
@@ -31,9 +32,46 @@ class QLogHandler(logging.Handler):
         super().__init__()
         self.widget = QtWidgets.QTextEdit(parent)
         self.widget.setReadOnly(True)
+        self._transform = None
+
+    def set_transform(self, fn):
+        """fn(record, msg) -> str | {'html': str} | None"""
+        self._transform = fn
 
     def emit(self, record):
-        msg = self.format(record)
+        formatted = self.format(record)  # prefix + message
+        raw_msg = record.getMessage()  # message only
+
+        # Color for prefix (log level)
+        clr = self.COLORS.get(record.levelno, QtGui.QColor('black')).name()
+
+        if self._transform is not None:
+            html_fragment = self._transform(record, raw_msg)
+            if html_fragment:
+                i = formatted.rfind(raw_msg)
+                if i >= 0:
+                    prefix = formatted[:i]
+                    suffix = formatted[i + len(raw_msg):]
+                else:
+                    prefix, suffix = "", ""
+
+                # Build HTML line
+                html = (
+                    f"<span style='color:{clr}'>{escape(prefix)}</span>"
+                    f"{html_fragment}"
+                    f"{escape(suffix)}"
+                )
+                self.widget.append(html)
+
+                # reset char format so bold/italics don’t bleed
+                self.widget.setCurrentCharFormat(QtGui.QTextCharFormat())
+                self.widget.verticalScrollBar().setValue(
+                    self.widget.verticalScrollBar().maximum()
+                )
+                return
+
+        # fallback: original plain text path
+        msg = formatted
         clr = self.COLORS.get(record.levelno, QtGui.QColor('black'))
         self.widget.setTextColor(clr)
         self.widget.append(msg)
@@ -58,6 +96,7 @@ class LogWidget(QtWidgets.QWidget):
         logTextBox = QLogHandler(self)
         logTextBox.setFormatter(fmt)
         logTextBox.setLevel(level)
+        self.handler = logTextBox
 
         # make the widget
         layout = QtWidgets.QVBoxLayout()

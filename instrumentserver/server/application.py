@@ -12,7 +12,7 @@ from .core import (
     StationServer,
     InstrumentModuleBluePrint, ParameterBluePrint
 )
-from .. import QtCore, QtWidgets, QtGui, Client
+from .. import QtCore, QtWidgets, QtGui, Client, getInstrumentserverPath
 from ..gui.misc import DetachableTabWidget, BaseDialog
 from ..gui.parameters import AnyInputForMethod
 from ..gui.instruments import GenericInstrument
@@ -506,10 +506,11 @@ class ServerGui(QtWidgets.QMainWindow):
         self.instrumentTabsOpen = {}
 
         self.setWindowTitle('Instrument server')
+        self.setWindowIcon(QtGui.QIcon(getInstrumentserverPath("resource", "icons") + "/server_app_icon.svg"))
 
         # A test client, just a simple helper object.
-        self.client = EmbeddedClient(raise_exceptions=False, timeout=5000000)
-        self.client.recv_timeout = 10_000
+        self.client = EmbeddedClient(raise_exceptions=False, timeout=5000)
+        self.client.recv_timeout_ms = 10_000
 
         # Central widget is simply a tab container.
         self.tabs = DetachableTabWidget(self)
@@ -725,6 +726,7 @@ class ServerGui(QtWidgets.QMainWindow):
                 if 'kwargs' in self._guiConfig[name]['gui']:
                     kwargs = self._guiConfig[name]['gui']['kwargs']
 
+            kwargs["sub_port"] = kwargs.get("sub_port", self.stationServer.port + 1)
             insWidget = widgetClass(ins, parent=self, **kwargs)
             index = self.tabs.addTab(insWidget, ins.name)
             self.instrumentTabsOpen[ins.name] = insWidget
@@ -815,7 +817,7 @@ def parameterToHtml(bp: ParameterBluePrint, headerLevel=None):
     # FIXME: We deleted the validator since there is no real easy way of deserializing them. It would be a good idea to
     #  have them here though
     # <li><b>Validator:</b> {html.escape(str(bp.vals))}</li>
-    var = """<li><b>Doc:</b> {html.escape(str(bp.docstring))}</li>
+    var = f"""<li><b>Doc:</b> {html.escape(str(bp.docstring))}</li>
 </ul>
 </div>
     """

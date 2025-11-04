@@ -1,0 +1,13 @@
+#test_sc:
+#  instrument_class: qcodes_drivers.SignalCore_SC5510B.SignalCore_SC5510B
+#  serial_number: "10003063"
+#
+#test_vna:
+#  instrument_class: qcodes_drivers.Keysight_E5071C.Keysight_E5071C
+#  address: "TCPIP0::10.66.27.77::INSTR"
+
+test_dummy1:
+  instrument_class: 'instrumentserver.testing.dummy_instruments.generic.DummyInstrumentTimeout'
+
+test_dummy2:
+  instrument_class: 'instrumentserver.testing.dummy_instruments.generic.DummyInstrumentTimeout'

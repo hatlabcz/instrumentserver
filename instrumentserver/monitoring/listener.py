@@ -9,6 +9,7 @@ import argparse
 import os.path
 
 from instrumentserver.base import recvMultipart
+from instrumentserver import QtCore
 from instrumentserver.blueprints import ParameterBroadcastBluePrint
 
 from abc import ABC, abstractmethod
@@ -79,6 +80,63 @@ class DFListener(Listener):
             logger.info(f"Writing data [{message.name},{message.value},{message.unit}]")
             self.df.loc[len(self.df)]=[datetime.datetime.now(),message.name,message.value,message.unit]
             self.df.to_csv(self.path)
+
+
+class QtListener(QtCore.QObject):
+    finished = QtCore.Signal()
+    serverSignal = QtCore.Signal(object)
+
+    def __init__(self, addr, parent=None):
+        """
+        Listener for server broadcast of parameter changes.
+        Rewritten based on monitoring.listener.Listener without ABC for use with Qt
+        :param addr: address to listen to, by default, should be main server address with port + 1
+        :param parent:
+        """
+        super().__init__(parent)
+        self.addr = addr
+        self._stop = False
+        self._ctx = None
+        self._sock = None
+
+    @QtCore.Slot()
+    def run(self):
+        logger.info(f"Connecting to {self.addr}")
+        self._ctx = zmq.Context.instance()
+        self._sock = self._ctx.socket(zmq.SUB)
+        try:
+            self._sock.connect(self.addr)
+            self._sock.setsockopt_string(zmq.SUBSCRIBE, "")
+            # Make recv interruptible so we can stop gracefully
+            self._sock.setsockopt(zmq.RCVTIMEO, 200)  # ms
+            logger.info("Listener Connected")
+
+            while not self._stop:
+                try:
+                    parts = recvMultipart(self._sock)  # e.g. [topic, payload, ...]
+                    payload = parts[1] if len(parts) > 1 else parts[0]
+                    self.listenerEvent(payload)
+                except zmq.Again:
+                    # timeout -> loop to check _stop
+                    continue
+                except (KeyboardInterrupt, SystemExit):
+                    logger.info("Program Stopped Manually")
+                    break
+        finally:
+            try:
+                if self._sock is not None:
+                    self._sock.close(linger=0)
+            finally:
+                self._sock = None
+            self.finished.emit()
+
+    @QtCore.Slot()
+    def stop(self):
+        self._stop = True
+
+    def listenerEvent(self, message: ParameterBroadcastBluePrint):
+        self.serverSignal.emit(message)
+
 
 def loadConfig(path):
 

@@ -105,8 +105,10 @@ To add more items to the toolbar for any extra functionality, you can do so by o
 from pprint import pprint
 from typing import Optional, List, Dict
 
+from instrumentserver.log import logger as get_logger
 from instrumentserver import QtCore, QtGui, QtWidgets
 
+logger = get_logger()
 
 class ItemBase(QtGui.QStandardItem):
     """
@@ -227,6 +229,7 @@ class InstrumentModelBase(QtGui.QStandardItemModel):
             if prefix is not None:
                 objectName = '.'.join([prefix, objectName])
             if objectName not in self.itemsHide:
+                logger.debug(objectName, obj, type(obj), "this called param update")
                 item = self.addItem(fullName=objectName, star=False, trash=False, element=obj)
                 if objectName in self.itemsTrash:
                     self.onItemTrashToggle(item)
@@ -421,7 +424,7 @@ class InstrumentSortFilterProxyModel(QtCore.QSortFilterProxyModel):
         # When the application is first starting, the  proxy model does not have the trash attribute.
         if hasattr(self, 'trash'):
             if self.trash:
-                if self._isParentTrash(parent) or item.trash:
+                if self._isParentTrash(parent) or getattr(item, "trash", False):
                     return False
 
         return super().filterAcceptsRow(source_row, source_parent)

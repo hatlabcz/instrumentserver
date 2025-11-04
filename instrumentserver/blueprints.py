@@ -57,6 +57,7 @@ from enum import Enum, unique
 from collections.abc import Iterable
 from dataclasses import dataclass, field, fields, asdict, is_dataclass, Field
 from typing import Union, Optional, List, Dict, Callable, Tuple, Any, get_args
+from uuid import uuid4
 
 import numpy as np
 import qcodes as qc
@@ -576,6 +577,8 @@ class ServerInstruction:
 
     _class_type: str = 'ServerInstruction'
 
+    request_id: str = field(default_factory=lambda: str(uuid4()))
+
     def validate(self):
         if self.operation is Operation.create_instrument:
             if not isinstance(self.create_instrument_spec, InstrumentCreationSpec):
@@ -613,6 +616,8 @@ class ServerInstruction:
         ret['kwargs'] = dict_to_serialized_dict(self.kwargs)
         ret['_class_type'] = self._class_type
 
+        ret["request_id"] = self.request_id
+
         return ret
 
 
@@ -636,10 +641,13 @@ class ServerResponse:
     #: The type of the class, used for deserializing it.
     _class_type: str = 'ServerResponse'
 
+    request_id: Optional[str] = None
+
     def __init__(self, message: Optional[Any] = None,
                  error: Optional[Union[None, str, Warning, Exception, dict]] = None,
-                 _class_type: str = 'ServerResponse'):
+                 _class_type: str = 'ServerResponse', request_id: Optional[str] = None):
         self.message = message
+        self.request_id = request_id
         if isinstance(message, str):
             try:
                 # Replacing some key characters so that if the serializer missed it,
@@ -683,6 +691,7 @@ class ServerResponse:
             ret['error'] = str(self.error)
 
         ret['_class_type'] = self._class_type
+        ret["request_id"] = self.request_id
 
         return ret
 
