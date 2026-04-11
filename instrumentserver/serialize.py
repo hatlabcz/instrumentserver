@@ -109,7 +109,10 @@ def toParamDict(input: SerializableType,
 
     """
     if isinstance(input, Station):
-        snap = input.snapshot()
+        if hasattr(input, "get_snapshot"):
+            snap = input.get_snapshot()
+        else:
+            snap = input.snapshot()
         input = [getattr(input, k) for k in snap['instruments'].keys()] \
             + [getattr(input, k) for k in snap['parameters'].keys()] \
             + [getattr(input, k) for k in snap['components'].keys()]
@@ -177,39 +180,6 @@ def fromParamDict(paramDict: Dict[str, Any],
 
 # Tools
 
-def saveParamsToFile(input: SerializableType,
-                     filePath: str, **kw: Any) -> None:
-    """Save (instrument) parameters to file.
-
-    First obtains the parameters from :func:`toParamDict`, then saves its output.
-
-    :param input: qcodes station or list of instruments/parameters.
-    :param filePath: Output file path.
-    :param kw: Options, all passed to :func:`toParamDict`.
-    :returns:
-    """
-    ret = toParamDict(input, **kw)
-    filePath = os.path.abspath(filePath)
-    folder, file = os.path.split(filePath)
-    if not os.path.exists(folder):
-        os.makedirs(folder)
-    with open(filePath, 'w') as f:
-        json.dump(ret, f, indent=2, sort_keys=True)
-
-
-def loadParamsFromFile(filePath: str,
-                       target: SerializableType) -> None:
-    """Load (instrument) parameters from file.
-
-    Loads the json from file, then tries to restore the state into the target,
-    using :func:`fromParamDict`.
-    """
-    ret = None
-    with open(filePath, 'r') as f:
-        ret = json.load(f)
-    fromParamDict(ret, target)
-
-
 def isSimpleFormat(paramDict: Dict[str, Any]):
     """Checks if the supplied paramDict is in the simplified format.
 
@@ -250,8 +220,11 @@ def _singleParameterToJson(parameter: Parameter,
                            simpleFormat: bool = True) -> Dict:
     """Create a JSON representation of a parameter."""
 
-    ret = {parameter.name: None}
-    snap = parameter.snapshot(update=get)
+    ret: dict[str, Any] = {parameter.name: None}
+    if hasattr(parameter, "get_snapshot"):
+        snap = parameter.get_snapshot(update=get)
+    else:
+        snap = parameter.snapshot(update=get)
     if len(includeMeta) == 0 and simpleFormat:
         ret[parameter.name] = snap.get('value', None)
     else:
@@ -274,9 +247,12 @@ def _singleInstrumentParametersToJson(instrument: InstrumentBase,
         excludeParameters.append("IDN")
 
     ret = {}
-    snap = instrument.snapshot(update=get)
+    if hasattr(instrument, "get_snapshot"):
+        snap = instrument.get_snapshot(update=get)
+    else:
+        snap = instrument.snapshot(update=get)
     for name, param in instrument.parameters.items():
-        if name not in excludeParameters:
+        if (name not in excludeParameters) and (not param.snapshot_exclude):
             if len(includeMeta) == 0 and simpleFormat:
                 ret[addPrefix + name] = snap['parameters'][name].get('value', None)
             else:
@@ -289,7 +265,8 @@ def _singleInstrumentParametersToJson(instrument: InstrumentBase,
 
     for name, submod in instrument.submodules.items():
         ret.update(_singleInstrumentParametersToJson(
-            submod, get=get, addPrefix=f"{addPrefix + name}.",
+            # FIXME: Fix this mypy ignore
+            submod, get=get, addPrefix=f"{addPrefix + name}.",  # type: ignore[arg-type]
             simpleFormat=simpleFormat, includeMeta=includeMeta))
     return ret
 
@@ -313,8 +290,7 @@ def _getParamFromList(parent: Any, childrenList: List[str]) -> Parameter:
 
 
 def _getObjectByName(name: str,
-                     src: Union[Station,
-                                List[Union[Instrument, Parameter]]]):
+                     src: SerializableType):
     """Get an object from a container by specifying its name."""
 
     if isinstance(src, Station):

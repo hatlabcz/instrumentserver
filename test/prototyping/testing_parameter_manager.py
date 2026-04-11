@@ -8,8 +8,6 @@ from qcodes import Station, Instrument
 from qcodes.utils import validators
 
 from instrumentserver import QtWidgets
-from instrumentserver.serialize import (
-    saveParamsToFile, loadParamsFromFile, toParamDict, fromParamDict)
 
 from instrumentserver.gui import widgetDialog
 from instrumentserver.params import ParameterManager
@@ -30,5 +28,5 @@ dialog = widgetDialog(ParameterManagerGui(pm))
 Instrument.close_all()
 
 cli = Client()
-pm = ProxyInstrument('pm', cli=cli, remotePath='pm')
-dialog = widgetDialog(ParameterManagerGui(pm))
+pm2 = ProxyInstrument('pm', cli=cli, remotePath='pm')
+dialog = widgetDialog(ParameterManagerGui(pm2))

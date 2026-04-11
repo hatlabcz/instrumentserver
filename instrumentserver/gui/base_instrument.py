@@ -7,7 +7,7 @@ The goal is to have a base design such that implementing further GUIS is simplif
 much code. To implement your own GUI you just need to inherit any particular part you want to customize.
 
 The assembled widget uses a TreeView to display some attribute of the passed instrument.
-It will go through the submodules contained in it and display them accordingly
+It will go through the submodules contained in it and display them accordingly.
 
 All the classes here assume that arguments present in them will exist in inherited ones. E.g.: all classes
 assume that the items used have a property star and trash. If your implementation of ItemBase deletes those properties
@@ -102,6 +102,7 @@ To add more items to the toolbar for any extra functionality, you can do so by o
 
 """
 
+import fnmatch
 from pprint import pprint
 from typing import Optional, List, Dict
 
@@ -185,7 +186,7 @@ class InstrumentModelBase(QtGui.QStandardItemModel):
 
     def __init__(self, instrument,
                  attr: str,
-                 itemClass: ItemBase = ItemBase,
+                 itemClass: type[ItemBase] = ItemBase,
                  itemsStar:Optional[List[str]] = [],
                  itemsTrash: Optional[List[str]] = [],
                  itemsHide: Optional[List[str]] = [],
@@ -197,7 +198,7 @@ class InstrumentModelBase(QtGui.QStandardItemModel):
         # Indicates the name of the attributes we are creating the model: Parameters or methods for now.
         self.attr = attr
         self.objectDictionary = getattr(self.instrument, self.attr)
-        self.itemClass: ItemBase = itemClass
+        self.itemClass = itemClass
 
         self.itemsStar = itemsStar
         self.itemsTrash = itemsTrash
@@ -209,6 +210,26 @@ class InstrumentModelBase(QtGui.QStandardItemModel):
         self.loadingItems = True
         self.loadItems()
         self.loadingItems = False
+
+    @staticmethod
+    def _matches_any_pattern(name: str, patterns: List[str]) -> bool:
+        """
+        Check if a name matches any glob pattern in the list.
+
+        Supports standard glob patterns:
+        - `*` matches any number of characters
+        - `?` matches a single character
+        - `[seq]` matches any character in seq
+        - `[!seq]` matches any character not in seq
+
+        :param name: The item name to check
+        :param patterns: List of glob patterns to match against (e.g., 'power_*', '*_frequency')
+        :return: True if name matches any pattern, False otherwise
+        """
+        for pattern in patterns:
+            if fnmatch.fnmatch(name, pattern):
+                return True
+        return False
 
     def loadItems(self, module=None, prefix=None):
         """
@@ -226,11 +247,11 @@ class InstrumentModelBase(QtGui.QStandardItemModel):
             # constructor
             if prefix is not None:
                 objectName = '.'.join([prefix, objectName])
-            if objectName not in self.itemsHide:
+            if not self._matches_any_pattern(objectName, self.itemsHide):
                 item = self.addItem(fullName=objectName, star=False, trash=False, element=obj)
-                if objectName in self.itemsTrash:
+                if self._matches_any_pattern(objectName, self.itemsTrash):
                     self.onItemTrashToggle(item)
-                if objectName in self.itemsStar:
+                if self._matches_any_pattern(objectName, self.itemsStar):
                     self.onItemStarToggle(item)
 
         for submodName, submod in module.submodules.items():
@@ -282,11 +303,11 @@ class InstrumentModelBase(QtGui.QStandardItemModel):
                 subModItem = self.itemClass(name=smName, star=False, trash=False, showDelegate=False, element=None)
                 # submodules get directly added here and not in the load function, so need to have it here too.
                 if self.loadingItems:
-                    if smName not in self.itemsHide:
+                    if not self._matches_any_pattern(smName, self.itemsHide):
                         self.insertItemTo(parent, subModItem)
-                        if smName in self.itemsTrash:
+                        if self._matches_any_pattern(smName, self.itemsTrash):
                             self.onItemTrashToggle(subModItem)
-                        if smName in self.itemsStar:
+                        if self._matches_any_pattern(smName, self.itemsStar):
                             self.onItemStarToggle(subModItem)
                 else:
                     self.insertItemTo(parent, subModItem)
@@ -411,9 +432,11 @@ class InstrumentSortFilterProxyModel(QtCore.QSortFilterProxyModel):
         """
         Calls for the super() unless trash is active and the item or one of its parent is trash.
         """
-        parent = self.sourceModel().itemFromIndex(source_parent)
+        model = self.sourceModel()
+        assert isinstance(model, InstrumentModelBase)
+        parent = model.itemFromIndex(source_parent)
         if parent is None:
-            item = self.sourceModel().item(source_row, 0)
+            item = model.item(source_row, 0)
         else:
             item = parent.child(source_row, 0)
 
@@ -421,7 +444,10 @@ class InstrumentSortFilterProxyModel(QtCore.QSortFilterProxyModel):
         # When the application is first starting, the  proxy model does not have the trash attribute.
         if hasattr(self, 'trash'):
             if self.trash:
-                if self._isParentTrash(parent) or item.trash:
+                # Assertion is there to satisfy mypy. item can be None, that is why we check before making the assertion
+                if item is not None:
+                    assert isinstance(item, ItemBase)
+                if self._isParentTrash(parent) or getattr(item, "trash", False): # item could be None when it's trashed and hidden
                     return False
 
         return super().filterAcceptsRow(source_row, source_parent)
@@ -435,8 +461,10 @@ class InstrumentSortFilterProxyModel(QtCore.QSortFilterProxyModel):
         # When the application is first starting, the  proxy model does not have the star attribute.
         if hasattr(self, 'star'):
             if self.star:
-                leftItem = self.sourceModel().itemFromIndex(left)
-                rightItem = self.sourceModel().itemFromIndex(right)
+                model = self.sourceModel()
+                assert isinstance(model, InstrumentModelBase)
+                leftItem = model.itemFromIndex(left)
+                rightItem = model.itemFromIndex(right)
                 if hasattr(leftItem, 'star') and hasattr(rightItem, 'star'):
                     if self.sortOrder() == QtCore.Qt.DescendingOrder:
                         if rightItem.star and not leftItem.star:
@@ -463,7 +491,7 @@ class InstrumentTreeViewBase(QtWidgets.QTreeView):
     #: emitted when this item got its star action triggered.
     itemStarToggle = QtCore.Signal(ItemBase)
 
-    def __init__(self, model, delegateColumns: Optional[List[int]]=None, parent: Optional[QtCore.QObject] = None):
+    def __init__(self, model, delegateColumns: Optional[List[int]]=None, parent: Optional[QtWidgets.QWidget] = None):
         super().__init__(parent=parent)
 
         # Indicates if a column is using delegates.
@@ -479,7 +507,10 @@ class InstrumentTreeViewBase(QtWidgets.QTreeView):
 
         # Because we are filtering we set a proxy model as the model, however, there are times we want to work with
         # the real model
-        self.modelActual: InstrumentModelBase = self.model().sourceModel()
+        m = self.model()
+        assert isinstance(m, InstrumentSortFilterProxyModel)
+        assert hasattr(m, 'sourceModel')
+        self.modelActual = m.sourceModel()
 
         # We need to turn sorting off so that the view sorting does not interfere with the proxy model sorting.
         self.setSortingEnabled(False)
@@ -512,12 +543,15 @@ class InstrumentTreeViewBase(QtWidgets.QTreeView):
         """
         Fills the collapsed state dictionary to be recovered after a filter event occured.
         """
+        assert isinstance(self.modelActual, InstrumentModelBase)
         if parentItem is None:
             for i in range(self.modelActual.rowCount()):
                 index = self.modelActual.index(i, 0)
                 item = self.modelActual.itemFromIndex(index)
                 persistentIndex = QtCore.QPersistentModelIndex(index)
-                proxyIndex = self.model().mapFromSource(index)
+                m = self.model()
+                assert isinstance(m, InstrumentSortFilterProxyModel)
+                proxyIndex = m.mapFromSource(index)
                 if proxyIndex.isValid():
                     self.collapsedState[persistentIndex] = self.isExpanded(proxyIndex)
                     if item.hasChildren():
@@ -527,7 +561,9 @@ class InstrumentTreeViewBase(QtWidgets.QTreeView):
                 child = parentItem.child(i, 0)
                 childIndex = self.modelActual.indexFromItem(child)
                 persistentIndex = QtCore.QPersistentModelIndex(childIndex)
-                proxyIndex = self.model().mapFromSource(childIndex)
+                m = self.model()
+                assert isinstance(m, InstrumentSortFilterProxyModel)
+                proxyIndex = m.mapFromSource(childIndex)
                 if proxyIndex.isValid():
                     self.collapsedState[persistentIndex] = self.isExpanded(proxyIndex)
                     if child.hasChildren():
@@ -670,7 +706,7 @@ class InstrumentDisplayBase(QtWidgets.QWidget):
                  proxyModelType = InstrumentSortFilterProxyModel,
                  viewType = InstrumentTreeViewBase,
                  callSignals: bool = True,
-                 parent: Optional[QtCore.QObject] = None,
+                 parent: Optional[QtWidgets.QWidget] = None,
                  **modelKwargs):
         super().__init__(parent=parent)
 

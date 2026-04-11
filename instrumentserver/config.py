@@ -5,8 +5,9 @@ variables since we parse the config using those.
 """
 import io
 import tempfile
+from typing import IO, Any
 
-import ruamel.yaml
+import ruamel.yaml  # type: ignore[import-untyped] # Known bugfix under no-fix status: https://sourceforge.net/p/ruamel-yaml/tickets/328/
 from pathlib import Path
 
 # Centralised point of extra fields for the server with its default as value
@@ -16,7 +17,7 @@ SERVERFIELDS = {'initialize': True}
 GUIFIELD = {'type': 'instrumentserver.gui.instruments.GenericInstrument', 'kwargs': {}}
 
 
-def loadConfig(configPath: str):
+def loadConfig(configPath: str | Path) -> tuple[str, dict, dict, IO[bytes], dict, dict]:
     """
     Loads the config for the instrumentserver. From 1 config file it splits the respective fields into 3 different
     objects: a serverConfig (the configurations for the server), a stationConfig(the qcodes station config file clean
@@ -26,9 +27,12 @@ def loadConfig(configPath: str):
     the added fields are removed from the loaded dictionary. After that it is converted to a byte stream and written
     into a temporary file. what is returned here is the path to that temporary file, after the station loads the
     file, it gets deleted automatically
+
+    The config also supports a 'gui_defaults' section for class-based GUI configuration that applies to all
+    instances of a given instrument class. These defaults are merged with instance-specific configs.
     """
     configPath = Path(configPath)
-    serverConfig = {}  # Config for the server
+    serverConfig: dict = {}  # Config for the server
     guiConfig = {}  # Individual gui config of each instrument
     fullConfig = {}  # serverConfig + guiConfig + any unfilled fields. Used for creating instruments from the gui
     pollingRates = {}  # Polling rates for each parameter
@@ -38,6 +42,16 @@ def loadConfig(configPath: str):
 
     yaml = ruamel.yaml.YAML()
     rawConfig = yaml.load(configPath)
+
+    if "instruments" not in rawConfig:
+        raise AttributeError("All configurations must be inside the 'instruments' field. "
+                             "Try adding 'instruments:' at the top of the config file and "
+                             "indenting everything underneath.")
+
+    # Parse gui_defaults section (class-based GUI configuration)
+    gui_defaults = {}
+    if 'gui_defaults' in rawConfig:
+        gui_defaults = rawConfig.pop('gui_defaults')
 
     # Removing any extra fields
     for instrumentName, configDict in rawConfig['instruments'].items():
@@ -75,6 +89,46 @@ def loadConfig(configPath: str):
                 pollingRates.update({instrumentName + "." + param: rate for param, rate in ratesDict.items()})
 
         fullConfig[instrumentName] = {'gui': guiConfig[instrumentName], **configDict, **serverConfig[instrumentName]}
+
+    # Merge gui_defaults into guiConfig for each instrument
+    if gui_defaults:
+        for instrumentName in guiConfig.keys():
+            # Get instrument class name from the type field
+            instrument_type = fullConfig[instrumentName].get('type', '')
+            class_name = instrument_type.split('.')[-1] if instrument_type else ''
+
+            # Initialize kwargs if not present
+            if 'kwargs' not in guiConfig[instrumentName]:
+                guiConfig[instrumentName]['kwargs'] = {}
+
+            # Merge patterns in order: __default__ → class → instance
+            # For each GUI config key (parameters-hide, methods-hide, etc.)
+            for config_key in ['parameters-hide', 'methods-hide', 'parameters-star', 'parameters-trash',
+                               'methods-star', 'methods-trash']:
+                merged_patterns = []
+
+                # 1. Add patterns from __default__
+                if '__default__' in gui_defaults:
+                    default_config = gui_defaults['__default__']
+                    if config_key in default_config:
+                        merged_patterns.extend(default_config[config_key])
+
+                # 2. Add patterns from class-specific defaults
+                if class_name and class_name in gui_defaults:
+                    class_config = gui_defaults[class_name]
+                    if config_key in class_config:
+                        merged_patterns.extend(class_config[config_key])
+
+                # 3. Add patterns from instance-specific config
+                if config_key in guiConfig[instrumentName]['kwargs']:
+                    merged_patterns.extend(guiConfig[instrumentName]['kwargs'][config_key])
+
+                # Store merged patterns if any exist
+                if merged_patterns:
+                    guiConfig[instrumentName]['kwargs'][config_key] = merged_patterns
+
+            # Update fullConfig with merged GUI config
+            fullConfig[instrumentName]['gui'] = guiConfig[instrumentName]
 
     # Gets all of the broadcasting and listening addresses from the config file
     if 'networking' in rawConfig:

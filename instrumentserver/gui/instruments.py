@@ -10,7 +10,7 @@ from qcodes import Parameter, Instrument
 from . import parameters, keepSmallHorizontally
 from .base_instrument import InstrumentDisplayBase, ItemBase, InstrumentModelBase, InstrumentTreeViewBase, DelegateBase
 from .parameters import ParameterWidget, AnyInput, AnyInputForMethod
-from .. import QtWidgets, QtCore, QtGui
+from .. import QtWidgets, QtCore, QtGui, DEFAULT_PORT
 from ..blueprints import ParameterBroadcastBluePrint
 from ..client import ProxyInstrument, SubClient
 from ..helpers import stringToArgsAndKwargs, nestedAttributeFromString
@@ -67,12 +67,12 @@ class AddParameterWidget(QtWidgets.QWidget):
 
         if typeInput:
             self.typeSelect = QtWidgets.QComboBox(self)
-            names = []
+            names: list[str] = []
             for t, v in parameterTypes.items():
-                names.append(v['name'])
+                names.append(str(v['name']))
             for n in sorted(names):
                 self.typeSelect.addItem(n)
-            self.typeSelect.setCurrentText(parameterTypes[ParameterTypes.numeric]['name'])
+            self.typeSelect.setCurrentText(str(parameterTypes[ParameterTypes.numeric]['name']))
             lbl = QtWidgets.QLabel("Type:")
             lbl.setAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
             layout.addWidget(lbl, 1, 0)
@@ -252,6 +252,14 @@ class ParameterDelegate(DelegateBase):
 
         ret = ParameterWidget(element, widget)
         self.parameters[item.name] = ret
+        # Try to fetch and display current value immediately
+        # ---- Chao: removed because the constructor of ParameterWidget object already calls parameter get ----
+        # if element.gettable:
+        #     try:
+        #         val = element.get()
+        #         ret._setMethod(val)
+        #     except Exception as e:
+        #         logger.warning(f"Failed to get value for parameter {element.name}: {e}")
         return ret
 
 
@@ -261,6 +269,9 @@ class ModelParameters(InstrumentModelBase):
     itemNewValue = QtCore.Signal(object, object)
 
     def __init__(self, *args, **kwargs):
+        # make sure we pass the server ip and port properly to the subscriber when the values are not defaults.
+        subClientArgs = {"sub_host": kwargs.pop("sub_host", 'localhost'),
+                         "sub_port": kwargs.pop("sub_port", DEFAULT_PORT + 1)}
         super().__init__(*args, **kwargs)
 
         self.setColumnCount(3)
@@ -268,7 +279,7 @@ class ModelParameters(InstrumentModelBase):
 
         # Live updates items
         self.cliThread = QtCore.QThread()
-        self.subClient = SubClient([self.instrument.name])
+        self.subClient = SubClient([self.instrument.name], **subClientArgs)
         self.subClient.moveToThread(self.cliThread)
 
         self.cliThread.started.connect(self.subClient.connect)
@@ -292,8 +303,14 @@ class ModelParameters(InstrumentModelBase):
         elif bp.action == 'parameter-update' or bp.action == 'parameter-call':
             item = self.findItems(fullName, QtCore.Qt.MatchExactly | QtCore.Qt.MatchRecursive, 0)
             if len(item) == 0:
-                self.addItem(fullName, element=nestedAttributeFromString(self.instrument, fullName))
+                if fullName not in self.itemsHide:
+                    try:
+                        self.addItem(fullName, element=nestedAttributeFromString(self.instrument, fullName))
+                    except AttributeError:
+                        # Parameter/submodule no longer exists (likely due to profile switch)
+                        logger.debug(f"Ignoring broadcast for non-existent parameter: {fullName}")
             else:
+                assert isinstance(item[0], ItemBase)
                 # The model can't actually modify the widget since it knows nothing about the view itself.
                 self.itemNewValue.emit(item[0].name, bp.value)
 
@@ -329,11 +346,16 @@ class ParametersTreeView(InstrumentTreeViewBase):
     @QtCore.Slot(object, object)
     def onItemNewValue(self, itemName, value):
         widget = self.delegate.parameters[itemName]
-        widget._setMethod(value)
+        try:
+            # use the abstract set method defined in parameter widget so it works for different types of widgets
+            widget._setMethod(value)
+        except RuntimeError as e:
+            logger.debug(f"Could not set value for {itemName} to {value}. Object is not being shown right now.")
+
 
 
 class InstrumentParameters(InstrumentDisplayBase):
-    def __init__(self, instrument, viewType=ParametersTreeView, callSignals: bool = True, **kwargs):
+    def __init__(self, instrument, parent=None, viewType=ParametersTreeView, callSignals: bool = True, **kwargs):
         if 'instrument' in kwargs:
             del kwargs['instrument']
         modelKwargs = {}
@@ -344,7 +366,14 @@ class InstrumentParameters(InstrumentDisplayBase):
         if 'parameters-hide' in kwargs:
             modelKwargs['itemsHide'] = kwargs.pop('parameters-hide')
 
+        # parameters for realtime update subscriber
+        if 'sub_host' in kwargs:
+            modelKwargs['sub_host'] = kwargs.pop('sub_host')
+        if 'sub_port' in kwargs:
+            modelKwargs['sub_port'] = kwargs.pop('sub_port')
+
         super().__init__(instrument=instrument,
+                         parent=parent,
                          attr='parameters',
                          itemType=ItemParameters,
                          modelType=ModelParameters,
@@ -434,7 +463,7 @@ class ProfilesManager(QtWidgets.QComboBox):
         self.clear()
         for profile in self.params.list_profiles():
             self.addItem(self.params.cleanProfileName(profile))
-            if profile == currentlySelected:
+            if self.params.cleanProfileName(profile) == currentlySelected:
                 self.setCurrentIndex(self.count() - 1)
         self.refreshing = False
 
@@ -453,12 +482,14 @@ class ParameterManagerGui(InstrumentParameters):
     #:  emitted when a parameter was created successfully
     parameterCreated = QtCore.Signal()
 
-    def __init__(self, instrument: Union[ProxyInstrument, ParameterManager], **kwargs):
-        super().__init__(instrument, viewType=ParameterManagerTreeView, callSignals=False, **kwargs)
+    def __init__(self, instrument: Union[ProxyInstrument, ParameterManager], parent=None,  **kwargs):
+        super().__init__(instrument, parent=None, viewType=ParameterManagerTreeView, callSignals=False, **kwargs)
         self.profileManager = ProfilesManager(parent=self)
         self.addParam = AddParameterWidget(parent=self)
-        self.layout().insertWidget(0, self.profileManager)
-        self.layout().addWidget(self.addParam)
+        layout = self.layout()
+        assert isinstance(layout, QtWidgets.QVBoxLayout)
+        layout.insertWidget(0, self.profileManager)
+        layout.addWidget(self.addParam)
         self.connectSignals()
         self.loadProfile()
 
@@ -573,8 +604,10 @@ class MethodsDelegate(DelegateBase):
         element = item.element
         ret = MethodDisplay(element, item.name, parent=widget)
 
+        parent = self.parent()
+        assert hasattr(parent, 'clearAlertsAction')
         # connecting the widget with the clear alert signal
-        self.parent().clearAlertsAction.triggered.connect(ret.alertLabel.clearAlert)
+        parent.clearAlertsAction.triggered.connect(ret.alertLabel.clearAlert)
 
         self.methods[item.name] = ret
         return ret
@@ -628,6 +661,20 @@ class GenericInstrument(QtWidgets.QWidget):
 
         self.ins = ins
 
+        if type(ins) is ProxyInstrument:
+            inst_type = "Proxy-" + ins.bp.instrument_module_class.split('.')[-1]
+        else:
+            inst_type = ins.__class__.__name__
+        
+        ins_label = f'{ins.name} | type: {inst_type}'
+
+        try:
+            # added a unique device_id if the instrument has that method
+            device_id = ins.device_id()
+            ins_label += f' | id: {device_id}'
+        except AttributeError:
+            pass
+
         self._layout = QtWidgets.QVBoxLayout(self)
         self.setLayout(self._layout)
 
@@ -636,9 +683,15 @@ class GenericInstrument(QtWidgets.QWidget):
 
         self.parametersList = InstrumentParameters(instrument=ins, **modelKwargs)
         self.methodsList = InstrumentMethods(instrument=ins, **modelKwargs)
-        self.instrumentNameLabel = QtWidgets.QLabel(f'{self.ins.name} | type: {type(self.ins)}')
+        self.instrumentNameLabel = QtWidgets.QLabel(ins_label)
 
         self._layout.addWidget(self.instrumentNameLabel)
         self._layout.addWidget(self.splitter)
         self.splitter.addWidget(self.parametersList)
         self.splitter.addWidget(self.methodsList)
+      
+
+        # Resize param name, unit, and function name columns after entries loaded
+        self.parametersList.view.resizeColumnToContents(0)
+        self.parametersList.view.resizeColumnToContents(1)
+        self.methodsList.view.resizeColumnToContents(0)

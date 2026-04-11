@@ -3,6 +3,7 @@ import importlib
 import logging
 import os
 import time
+import sys
 from typing import Union, Optional, Any, Dict
 
 from instrumentserver.client import QtClient
@@ -12,7 +13,7 @@ from .core import (
     StationServer,
     InstrumentModuleBluePrint, ParameterBluePrint
 )
-from .. import QtCore, QtWidgets, QtGui, Client
+from .. import QtCore, QtWidgets, QtGui, Client, getInstrumentserverPath
 from ..gui.misc import DetachableTabWidget, BaseDialog
 from ..gui.parameters import AnyInputForMethod
 from ..gui.instruments import GenericInstrument
@@ -322,7 +323,8 @@ class PossibleInstrumentsDisplay(QtWidgets.QTreeWidget):
 
         # Only add the instrument to the tree if there are no other instruments of the same type already
         if len(items) == 0:
-            parent = PossibleInstrumentDisplayItem(text=[insType, '', ''], fullInsType=fullInsType,)
+            parent: PossibleInstrumentDisplayItem | QtWidgets.QTreeWidgetItem = (
+                PossibleInstrumentDisplayItem(text=[insType, '', ''], fullInsType=fullInsType,))
             self.addTopLevelItem(parent)
             self.expand(self.indexFromItem(parent, 0))
         else:
@@ -331,6 +333,8 @@ class PossibleInstrumentsDisplay(QtWidgets.QTreeWidget):
         if configName is None and insName in self.config:
             configName = insName
 
+        createButton = QtWidgets.QPushButton("Create")
+
         lst = [configName, insName, 'create']
         lineEdit = QtWidgets.QLineEdit()
         lineEdit.returnPressed.connect(lambda: createButton.clicked.emit())
@@ -338,7 +342,6 @@ class PossibleInstrumentsDisplay(QtWidgets.QTreeWidget):
         item = PossibleInstrumentDisplayItem(lst, fullInsType=fullInsType, configName=configName, lineEdit=lineEdit)
         parent.addChild(item)
 
-        createButton = QtWidgets.QPushButton("Create")
         self.setItemWidget(item, 1, lineEdit)
         self.setItemWidget(item, 2, createButton)
 
@@ -493,7 +496,7 @@ class ServerGui(QtWidgets.QMainWindow):
         super().__init__()
 
         self._paramValuesFile = os.path.abspath(os.path.join('.', 'parameters.json'))
-        self._bluePrints = {}
+        self._bluePrints: dict[str, InstrumentModuleBluePrint] = {}
         self._serverKwargs = serverKwargs
         if guiConfig is None:
             self._guiConfig = {}
@@ -503,13 +506,18 @@ class ServerGui(QtWidgets.QMainWindow):
         self.stationServer = None
         self.stationServerThread = None
 
-        self.instrumentTabsOpen = {}
+        self.instrumentTabsOpen: dict[str, GenericInstrument] = {}
 
         self.setWindowTitle('Instrument server')
+        # Set unique Windows App ID so that this app can have separate taskbar entry than other Qt apps
+        if sys.platform == "win32":
+            import ctypes
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("InstrumentServer.Server")
+        self.setWindowIcon(QtGui.QIcon(getInstrumentserverPath("resource", "icons") + "/server_app_icon.svg"))
 
         # A test client, just a simple helper object.
-        self.client = EmbeddedClient(raise_exceptions=False, timeout=5000000)
-        self.client.recv_timeout = 10_000
+        self.client = EmbeddedClient(raise_exceptions=False, timeout=5000)
+        self.client.recv_timeout_ms = 10_000
 
         # Central widget is simply a tab container.
         self.tabs = DetachableTabWidget(self)
@@ -725,6 +733,7 @@ class ServerGui(QtWidgets.QMainWindow):
                 if 'kwargs' in self._guiConfig[name]['gui']:
                     kwargs = self._guiConfig[name]['gui']['kwargs']
 
+            kwargs["sub_port"] = kwargs.get("sub_port", self.stationServer.port + 1)
             insWidget = widgetClass(ins, parent=self, **kwargs)
             index = self.tabs.addTab(insWidget, ins.name)
             self.instrumentTabsOpen[ins.name] = insWidget
@@ -748,6 +757,99 @@ class ServerGui(QtWidgets.QMainWindow):
     def closeInstrument(self, ins):
         if ins in self.client.list_instruments():
             self.client.close_instrument(ins)
+
+
+class DetachedServerGui(QtWidgets.QMainWindow):
+    """A detached version of the server gui."""
+
+    def __init__(self, host: str = 'localhost', port: int = 5555):
+        super().__init__()
+
+        self.instrumentTabsOpen: dict[str, GenericInstrument] = {}
+
+        self.client = Client(host, port, timeout=20)
+        self.subClient = None
+
+        self.setWindowTitle('Instrument server detached')
+
+        self.tabs = DetachableTabWidget(self)
+        self.tabs.onTabClosed.connect(self.onTabDeleted)
+
+        self.setCentralWidget(self.tabs)
+        self.stationList = StationList()
+        self.stationObjInfo = StationObjectInfo()
+
+        self.stationList.componentSelected.connect(self.displayComponentInfo)
+        self.stationList.itemDoubleClicked.connect(self.addInstrumentTab)
+
+        stationWidgets = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
+        stationWidgets.addWidget(self.stationList)
+        stationWidgets.addWidget(self.stationObjInfo)
+        stationWidgets.setSizes([300, 500])
+
+        self.tabs.addUnclosableTab(stationWidgets, 'Station')
+
+        # Toolbar.
+        self.toolBar = self.addToolBar('Tools')
+        self.toolBar.setIconSize(QtCore.QSize(16, 16))
+
+        # Station tools.
+        self.toolBar.addWidget(QtWidgets.QLabel('Station:'))
+        self.refreshStationAction = QtWidgets.QAction(
+            QtGui.QIcon(":/icons/refresh.svg"), 'Refresh', self)
+        self.refreshStationAction.triggered.connect(self.refreshStationComponents)
+        self.toolBar.addAction(self.refreshStationAction)
+
+        self.refreshStationComponents()
+
+    def refreshStationComponents(self):
+        """Clear and re-populate the widget holding the station components, using
+        the objects that are currently registered in the station."""
+        self.stationList.clear()
+        for ins in self.client.list_instruments():
+            bp = self.client.getBluePrint(ins)
+            self.stationList.addInstrument(bp)
+        self.stationList.resizeColumnToContents(0)
+
+    @QtCore.Slot(str)
+    def displayComponentInfo(self, name: Union[str, None]):
+        if name is not None and name in self.client.list_instruments():
+            self.stationObjInfo.setObject(self.client.getBluePrint(name))
+
+    @QtCore.Slot(QtWidgets.QTreeWidgetItem, int)
+    def addInstrumentTab(self, item: QtWidgets.QTreeWidgetItem, index: int):
+        name = item.text(0)
+        if name not in self.instrumentTabsOpen:
+            ins = self.client.find_or_create_instrument(name)
+            widgetClass = GenericInstrument
+            kwargs = {}
+            try:
+                guiConfig = self.client._getGuiConfig(name)
+                moduleName = '.'.join(guiConfig['gui']['type'].split('.')[:-1])
+                widgetClassName = guiConfig['gui']['type'].split('.')[-1]
+                module = importlib.import_module(moduleName)
+                widgetClass = getattr(module, widgetClassName)
+
+                if 'kwargs' in guiConfig['gui']:
+                    kwargs = guiConfig[name]['gui']['kwargs']
+
+            # If the instrument does not have a guiconfig an exception is raised. just use defaults values
+            except Exception as e:
+                pass
+
+            insWidget = widgetClass(ins, parent=self, **kwargs)
+            index = self.tabs.addTab(insWidget, ins.name)
+            self.instrumentTabsOpen[ins.name] = insWidget
+            self.tabs.setCurrentIndex(index)
+
+        elif name in self.instrumentTabsOpen:
+            self.tabs.setCurrentWidget(self.instrumentTabsOpen[name])
+
+    @QtCore.Slot(str)
+    def onTabDeleted(self, name: str) -> None:
+        if name in self.instrumentTabsOpen:
+            del self.instrumentTabsOpen[name]
+
 
 def startServerGuiApplication(guiConfig: Optional[Dict[str, Dict[str, Any]]] = None,
                               **serverKwargs: Any) -> "ServerGui":
@@ -815,7 +917,7 @@ def parameterToHtml(bp: ParameterBluePrint, headerLevel=None):
     # FIXME: We deleted the validator since there is no real easy way of deserializing them. It would be a good idea to
     #  have them here though
     # <li><b>Validator:</b> {html.escape(str(bp.vals))}</li>
-    var = """<li><b>Doc:</b> {html.escape(str(bp.docstring))}</li>
+    var = f"""<li><b>Doc:</b> {html.escape(str(bp.docstring))}</li>
 </ul>
 </div>
     """
@@ -834,17 +936,19 @@ def instrumentToHtml(bp: InstrumentModuleBluePrint):
     ret += """<div class='category_name'>Parameters</div>
 <ul>
     """
-    for pn in sorted(bp.parameters):
-        pbp = bp.parameters[pn]
-        ret += f"<li>{parameterToHtml(pbp, 2)}</li>"
-    ret += "</ul>"
+    if bp.parameters is not None:
+        for pn in sorted(bp.parameters):
+            pbp = bp.parameters[pn]
+            ret += f"<li>{parameterToHtml(pbp, 2)}</li>"
+        ret += "</ul>"
 
     ret += """<div class='category_name'>Methods</div>
 <ul>
 """
-    for mn in sorted(bp.methods):
-        mbp = bp.methods[mn]
-        ret += f"""
+    if bp.methods is not None:
+        for mn in sorted(bp.methods):
+            mbp = bp.methods[mn]
+            ret += f"""
 <li>
     <div class="method_container">
     <div class='object_name'>{mbp.name}</div>
@@ -860,10 +964,11 @@ def instrumentToHtml(bp: InstrumentModuleBluePrint):
     <div class='category_name'>Submodules</div>
     <ul>
     """
-    for sn in sorted(bp.submodules):
-        sbp = bp.submodules[sn]
-        ret += "<li>" + instrumentToHtml(sbp) + "</li>"
-    ret += """
+    if bp.submodules is not None:
+        for sn in sorted(bp.submodules):
+            sbp = bp.submodules[sn]
+            ret += "<li>" + instrumentToHtml(sbp) + "</li>"
+        ret += """
     </ul>
     </div>
     """

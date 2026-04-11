@@ -2,6 +2,7 @@ import logging
 import math
 import numbers
 from typing import Any, Optional, List
+import re
 
 from qcodes import Parameter
 
@@ -14,6 +15,20 @@ logger = logging.getLogger(__name__)
 
 
 # TODO: do all styling with a global style sheet
+
+FLOAT_PRECISION = 10 # The maximum number of significant digits for float numbers
+
+def float_formater(val):
+    """
+    For displaying float numbers with scientific notation.
+    """
+    if isinstance(val, float):
+        if abs(val) > 1e5 or (0 < abs(val) < 1e-4):
+            formatted = f"{val:.{FLOAT_PRECISION - 1}g}"
+            # remove leading 0 in exponent
+            formatted = re.sub(r"e([+-])0(\d+)", r"e\1\2", formatted)
+            return formatted
+    return str(val)
 
 
 class ParameterWidget(QtWidgets.QWidget):
@@ -35,14 +50,14 @@ class ParameterWidget(QtWidgets.QWidget):
     _valueFromWidget = QtCore.Signal(object)
 
     def __init__(self, parameter: Parameter, parent=None,
-                 additionalWidgets: Optional[List[QtWidgets.QWidget]] = []):
+                 additionalWidgets: Optional[List[QtWidgets.QWidget]] = None):
 
         super().__init__(parent)
 
         self.setAutoFillBackground(True)
 
         self._parameter = parameter
-        self._getMethod = lambda: None
+        self._getMethod: Callable[[], Optional[Any]] = lambda: None
         self._setMethod = lambda x: None
 
         layout = QtWidgets.QGridLayout(self)
@@ -72,23 +87,26 @@ class ParameterWidget(QtWidgets.QWidget):
             # input widget
             ptype = paramTypeFromVals(parameter.vals)
             vals = parameter.vals
+            self.paramWidget: NumberInput | AnyInput | QtWidgets.QLineEdit | QtWidgets.QCheckBox | QtWidgets.QLabel
 
-            if ptype is ParameterTypes.integer:
-                self.paramWidget = QtWidgets.QSpinBox(self)
-                self.paramWidget.setMinimum(
-                    -int(1e10) if not math.isfinite(vals._min_value) or
-                                  abs(vals._min_value) > 1e10 else vals._min_value
-                )
-                self.paramWidget.setMaximum(
-                    int(1e10) if not math.isfinite(vals._max_value) or
-                                 abs(vals._max_value) > 1e10 else vals._max_value
-                )
-                self.paramWidget.setValue(parameter())
-                self.paramWidget.valueChanged.connect(self.setPending)
-                self._getMethod = self.paramWidget.value
-                self._setMethod = self.paramWidget.setValue
+            # FIXME: Currently blueprints don't pass validators meaning that we will never reach any of these if statements.
+            #  This should get uncommented when the blueprints are fixed.
+            # if ptype is ParameterTypes.integer:
+            #     self.paramWidget = QtWidgets.QSpinBox(self)
+            #     self.paramWidget.setMinimum(
+            #         -int(1e10) if not math.isfinite(vals._min_value) or
+            #                       abs(vals._min_value) > 1e10 else vals._min_value
+            #     )
+            #     self.paramWidget.setMaximum(
+            #         int(1e10) if not math.isfinite(vals._max_value) or
+            #                      abs(vals._max_value) > 1e10 else vals._max_value
+            #     )
+            #     self.paramWidget.setValue(parameter())
+            #     self.paramWidget.valueChanged.connect(self.setPending)
+            #     self._getMethod = self.paramWidget.value
+            #     self._setMethod = self.paramWidget.setValue
 
-            elif ptype is ParameterTypes.numeric or ptype is ParameterTypes.complex:
+            if ptype is ParameterTypes.numeric or ptype is ParameterTypes.complex:
                 self.paramWidget = NumberInput(self)
                 self.paramWidget.setValue(parameter())
                 self.paramWidget.textChanged.connect(self.setPending)
@@ -123,9 +141,15 @@ class ParameterWidget(QtWidgets.QWidget):
         else:
             self.setButton.setDisabled(True)
             self.paramWidget = QtWidgets.QLabel(self)
-            self._setMethod = lambda x: self.paramWidget.setText(str(x))
+            self._setMethod = lambda x: self.paramWidget.setText(str(x)) \
+                if isinstance(self.paramWidget, QtWidgets.QLabel) else None
+            try: # also do immediate update for read-only params, as what we do for the editable parameters above.
+                self._setMethod(parameter())
+            except Exception as e:
+                logger.warning(f"Error when setting parameter {parameter}: {e}", exc_info=True)
 
         layout.addWidget(self.paramWidget, 0, 0)
+        additionalWidgets = additionalWidgets or []
         for i, w in enumerate(additionalWidgets):
             layout.addWidget(w, 0, 4 + i)
 
@@ -211,7 +235,10 @@ QPushButton:checked { background-color: palegreen }
             return self.input.text()
 
     def setValue(self, val: Any):
-        self.input.setText(str(val))
+        try:
+            self.input.setText(float_formater(val))
+        except RuntimeError as e:
+            logger.debug(f"Could not set value {val} in AnyInput element does not exists, raised {type(e)}: {e.args}")
 
     @QtCore.Slot(str)
     def _processTextEdited(self, val: str):
@@ -251,8 +278,10 @@ class NumberInput(QtWidgets.QLineEdit):
             return None
 
     def setValue(self, value: numbers.Number):
-        self.setText(str(value))
-
+        try:
+            self.setText(float_formater(value))
+        except RuntimeError as e:
+            logger.debug(f"Could not set value {value} in NumberInput, raised {type(e)}: {e.args}")
 
 class AnyInputForMethod(AnyInput):
     """

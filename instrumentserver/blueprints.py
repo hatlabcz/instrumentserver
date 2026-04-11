@@ -56,10 +56,9 @@ import logging
 from enum import Enum, unique
 from collections.abc import Iterable
 from dataclasses import dataclass, field, fields, asdict, is_dataclass, Field
-from typing import Union, Optional, List, Dict, Callable, Tuple, Any, get_args
+from typing import Union, Optional, List, Dict, Callable, Tuple, Any, get_args, cast
 
 import numpy as np
-import qcodes as qc
 from qcodes import (
     Station, Instrument, InstrumentChannel, Parameter, ParameterWithSetpoints)
 from qcodes.instrument.base import InstrumentBase
@@ -137,7 +136,7 @@ def bluePrintFromParameter(path: str, param: ParameterType) -> \
         gettable=True if hasattr(param, 'get') else False,
         settable=True if hasattr(param, 'set') else False,
         unit=param.unit,
-        docstring=param.__doc__,
+        docstring=param.__doc__ or "",
     )
     if hasattr(param, 'setpoints'):
         bp.setpoints = [setpoint.name for setpoint in param.setpoints]
@@ -152,7 +151,7 @@ class MethodBluePrint:
     path: str
     call_signature_str: str
     signature_parameters: dict
-    docstring: str = None
+    docstring: str = ""
     _class_type: str = 'MethodBluePrint'
 
     def __repr__(self):
@@ -170,7 +169,7 @@ class MethodBluePrint:
 
     # we might want to be careful to keep them in the correct order
     @classmethod
-    def signature_str_and_params_from_obj(cls, sig: inspect.signature) -> Tuple[str, dict]:
+    def signature_str_and_params_from_obj(cls, sig: inspect.Signature) -> Tuple[str, dict]:
         call_signature_str = str(sig)
         param_dict = {}
         for name, param in sig.parameters.items():
@@ -189,7 +188,7 @@ def bluePrintFromMethod(path: str, method: Callable) -> Union[MethodBluePrint, N
         path=path,
         call_signature_str=sig_str,
         signature_parameters=param_dict,
-        docstring=method.__doc__,
+        docstring=method.__doc__ or "",
     )
     return bp
 
@@ -305,7 +304,7 @@ def bluePrintFromInstrumentModule(path: str, ins: InstrumentModuleType) -> \
         path=path,
         base_class=typeClassPath(base_class),
         instrument_module_class=objectClassPath(ins),
-        docstring=ins.__doc__
+        docstring=ins.__doc__ or "",
     )
     bp.parameters = {}
     bp.methods = {}
@@ -313,6 +312,7 @@ def bluePrintFromInstrumentModule(path: str, ins: InstrumentModuleType) -> \
 
     for pn, p in ins.parameters.items():
         param_path = f"{path}.{p.name}"
+        p = cast(ParameterType, p)
         param_bp = bluePrintFromParameter(param_path, p)
         if param_bp is not None:
             bp.parameters[pn] = param_bp
@@ -331,7 +331,8 @@ def bluePrintFromInstrumentModule(path: str, ins: InstrumentModuleType) -> \
 
     for sn, s in ins.submodules.items():
         sub_path = f"{path}.{sn}"
-        sub_bp = bluePrintFromInstrumentModule(sub_path, s)
+        # FIXME: Fix this mypy ignore
+        sub_bp = bluePrintFromInstrumentModule(sub_path, s)  # type:ignore[arg-type]
         if sub_bp is not None:
             bp.submodules[sn] = sub_bp
 
@@ -343,8 +344,8 @@ class ParameterBroadcastBluePrint:
     """Blueprint to broadcast parameter changes."""
     name: str
     action: str
-    value: int = None
-    unit: str = None
+    value: int | None = None
+    unit: str = ""
     _class_type: str = 'ParameterBroadcastBluePrint'
 
     def __str__(self) -> str:
@@ -379,7 +380,7 @@ BluePrintType = Union[ParameterBluePrint, MethodBluePrint, InstrumentModuleBlueP
 
 
 def _dictToJson(_dict: dict, json_type: bool = True) -> dict:
-    ret = {}
+    ret: dict = {}
     for key, value in _dict.items():
         if isinstance(value, dict):
             ret[key] = _dictToJson(value, json_type)
@@ -401,7 +402,7 @@ def bluePrintToDict(bp: BluePrintType, json_type=True) -> dict:
     :param json_type: If True, the values are str. If False, the values remain the objects that are in the blueprint.
         Defaults True.
     """
-    bp_dict = {}
+    bp_dict: dict = {}
     for my_field in fields(bp):
         value = bp.__getattribute__(my_field.name)
         if isinstance(value, get_args(BluePrintType)):
@@ -437,6 +438,9 @@ class Operation(Enum):
 
     #: Set station parameters from a dictionary.
     set_params = 'set_params'
+
+    #: Gets the GUI configuration for an instrument.
+    get_gui_config = 'get_gui_config'
 
 
 @dataclass
@@ -585,6 +589,10 @@ class ServerInstruction:
             if not isinstance(self.call_spec, CallSpec):
                 raise ValueError('Invalid call spec.')
 
+        if self.operation is Operation.get_gui_config:
+            if not isinstance(self.requested_path, str):
+                raise ValueError('Invalid requested path.')
+
     def toJson(self):
         ret = {'operation': str(self.operation.name)}
 
@@ -694,6 +702,9 @@ def _convert_arbitrary_obj_to_dict(obj: object) -> Dict[str, Any]:
     all of those attributes are natively JSON serializable. These should also be accepted as keyword arguments in the
     constructor of the object.
     """
+    if not hasattr(obj, 'attributes'):
+        raise AttributeError('Object does not have an attribute called "attributes"')
+
     obj_dict = {}
     for attr in obj.attributes:
         obj_dict[attr] = getattr(obj, attr)
@@ -741,7 +752,7 @@ def iterable_to_serialized_dict(iterable: Optional[Iterable[Any]] = None):
         - The serialized dictionary need to have the field: '_class_type', to indicate what it is that needs to be
         instantiated.
     """
-    converted_iterable = None
+    converted_iterable: list | dict | None = None
     if iterable is not None:
         converted_iterable = []
         for item in iterable:
@@ -888,5 +899,5 @@ def deserialize_obj(data: Any):
         for item in data:
             deserialized_iterable.append(deserialize_obj(item))
         # Returns the same type of iterable
-        return type(data)(deserialized_iterable)
+        return deserialized_iterable
 
