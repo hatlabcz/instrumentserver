@@ -353,7 +353,6 @@ class ParametersTreeView(InstrumentTreeViewBase):
             logger.debug(f"Could not set value for {itemName} to {value}. Object is not being shown right now.")
 
 
-
 class InstrumentParameters(InstrumentDisplayBase):
     def __init__(self, instrument, parent=None, viewType=ParametersTreeView, callSignals: bool = True, **kwargs):
         if 'instrument' in kwargs:
